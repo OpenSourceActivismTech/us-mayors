@@ -60,8 +60,8 @@ def get_mayors_for_state(state):
                 # items[0] == \n
                 'img_url': items[1]['src'],
                 'name': items[2].string,
-                'city': items[3].split(',')[0],
-                'state': items[3].split(',')[1],
+                'city': items[3].split(',')[0].strip(),
+                'state': items[3].split(',')[1].strip(),
             }
         except IndexError:
             logging.error('unable to get common fields from', items)
