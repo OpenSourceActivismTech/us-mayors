@@ -5,88 +5,88 @@ mayors.py - scrape information about US Mayors from usmayors.org
 """
 
 import argparse
+import logging
 import csv
 import json
 from datetime import datetime
 from os.path import splitext
 
 import requests
-from lxml import html
+from bs4 import BeautifulSoup
 
-ALL_STATES = """
-    AL AK AZ AR CA CO CT DC DE FL GA GU HI ID IL IN IA KS KY LA ME MD MA MI
-    MN MO MP MS MT NE NV NH NJ NM NY NC ND OH OK OR PA PR RI SC SD TN TX UT
-    VT VA WA WV WI WY""".split()
+SEARCH_URL = "https://www.usmayors.org/mayors/meet-the-mayors/"
 
-BASE_URL = "http://legacy.usmayors.org/"
-SEARCH_URL = "http://legacy.usmayors.org/meetmayors/mayorsatglance.asp"
+from states import ALL_STATES
 
-FIELD_MAP = {
-    "next mayoral election": "next_election",
-    "mayor's e-mail address": "email",
-    "city's web site": "city_site_url",
-}
 
 CSV_FIELDS = '''
     name email phone bio_url img_url city state population
     city_site_url next_election'''.split()
 
+def parse_phone(p):
+    if p:
+        p = p.replace('(','').replace(')', '').replace(' ', '-')
+    return p
 
 def get_mayors_for_state(state):
-    payload = {'mode': 'search_db', 'State': state}
-    response = requests.post(SEARCH_URL, data=payload)
+    payload = {"searchTerm": state}
+    response = requests.post(
+        url=SEARCH_URL,
+        data=payload,
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
+            "User-Agent": "OpenSourceActivism.tech"
+        }
+    )
     response.raise_for_status()
-    root = html.fromstring(response.content)
 
-    for node in root.cssselect('table.pagesSectionBodyTightBorder'):
+    page = BeautifulSoup(response.text, 'html.parser')
+    content = page.select_one('div.post-content')
+    mayor_list = content.find_all('ul')
+    if not mayor_list:
+        logging.info(f'no mayors found for {state}')
+        return []
+    logging.info(f'found {len(mayor_list)} mayors for {state}')
+
+    parsed_list = []
+    for mayor_ul in mayor_list:
+        for br in mayor_ul.find_all('br'):
+            br.decompose() # delete from the tree
+
+        items = mayor_ul.contents
+        # set common data fields by index
         try:
-            yield _get_mayor_from_table(node)
-        except Exception:
-            print("ERROR doing {}".format(state))
-            import traceback
-            traceback.print_exc()
+            data = {
+                # items[0] == \n
+                'img_url': items[1]['src'],
+                'name': items[2].string,
+                'city': items[3].split(',')[0],
+                'state': items[3].split(',')[1],
+            }
+        except IndexError:
+            logging.error('unable to get common fields from', items)
             continue
+        # match others by text prefix
+        for item in items:
+            if 'Population' in item:
+                data['population'] = item.split(':')[1].replace(',', '')
+            if 'Next Election Date' in item:
+                next_election = item.split(':')[1].strip()
+                parsed_next_election = datetime.strptime(next_election, "%m/%d/%Y") 
+                data['next_election'] = parsed_next_election.strftime("%Y-%m-%d")
 
-
-def _get_mayor_from_table(table):
-    mayor_data = {}
-    main_row = table.getchildren()[0]
-    first_cell = main_row.getchildren()[0]
-
-    name_and_city_state = first_cell.cssselect('strong')[0]
-    [name, city_state] = name_and_city_state.xpath('text()')
-    mayor_data['name'] = name
-    [city, state] = city_state.split(', ')
-    mayor_data['city'] = city
-    mayor_data['state'] = state
-
-    bio_url = first_cell.cssselect('a')
-    if bio_url:
-        mayor_data['bio_url'] = bio_url[0].attrib['href']
-
-    for data_cell in first_cell.cssselect('table tr td'):
-        key, value = data_cell.text_content().split(':', 1)
-        key = key.strip().lower()
-        key = FIELD_MAP.get(key, key)
-        mayor_data[key] = value.strip()
-
-    mayor_data['population'] = mayor_data.get('population', '').replace(',', '')
-
-    mayor_data['email'] = mayor_data.get('email', '').replace('mailto:', '')
-
-    next_election = mayor_data.get('next_election')
-    if next_election:
-        try:
-            parsed_next_election = datetime.strptime(next_election, "%m/%d/%Y")
-            mayor_data['next_election'] = parsed_next_election.strftime("%Y-%m-%d")
-        except ValueError:
-            pass
-
-    img_path = main_row.getchildren()[2].cssselect('img')[0].attrib['src']
-    mayor_data['img_url'] = BASE_URL + img_path.lstrip('/')
-
-    return mayor_data
-
+            # match links by text or protocol
+            if item.name == 'a':
+                if 'Web Site' in item:
+                   data['city_site_url'] = item['href']
+                elif 'Bio' in item:
+                    data['bio_url'] = item['href']
+                elif 'tel:' in item.get('href'):
+                    data['phone'] = parse_phone(item.string)
+                elif 'mailto:' in item.get('href'):
+                    data['email'] = item.string
+        parsed_list.append(data)
+    return parsed_list
 
 def get_mayors(states=ALL_STATES):
     for state in states:
@@ -113,8 +113,12 @@ def parse_arguments():
                         default='-')
     parser.add_argument('--format', choices=['csv', 'json'])
     parser.add_argument('--state', nargs='*', default=ALL_STATES)
+    parser.add_argument("-v", "--verbose", help="increase output verbosity",
+                    action="store_true")
 
     args = parser.parse_args()
+    if args.verbose:
+        logging.basicConfig(level=logging.INFO)
 
     # guess format from file extension
     if args.format is None:
@@ -131,7 +135,6 @@ def parse_arguments():
     }[args.format]  # may KeyError if format is unrecognized
 
     return args
-
 
 if __name__ == '__main__':
     args = parse_arguments()
